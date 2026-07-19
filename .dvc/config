@@ -1,0 +1,4 @@
+[core]
+    remote = self_cleaning_storage
+['remote "self_cleaning_storage"']
+    url = /tmp/dvc_scratch
