@@ -15,6 +15,7 @@ dependencies = [
     "pip",
     "python-dotenv",
     "ruff",
+    "xgboost>=3.2.0",
 ]
 
 # Tell uv to treat this strictly as an application, not a buildable package
