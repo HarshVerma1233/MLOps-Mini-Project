@@ -1,10 +1,23 @@
 # src/model/register_model.py
-import os
 import json
-import logging
-import pickle
 import mlflow
-from mlflow.tracking import MlflowClient
+import logging
+import os
+
+# Set up DagsHub credentials for MLflow tracking
+dagshub_token = os.getenv("DAGSHUB_PAT")
+if not dagshub_token:
+    raise EnvironmentError("DAGSHUB_PAT environment variable is not set. Please export it in your terminal.")
+
+os.environ["MLFLOW_TRACKING_USERNAME"] = dagshub_token
+os.environ["MLFLOW_TRACKING_PASSWORD"] = dagshub_token
+
+dagshub_url = "https://dagshub.com"
+repo_owner = "HarshVerma1233"
+repo_name = "MLOps-Mini-Project"
+
+# Set up MLflow tracking URI targeting DagsHub remote
+mlflow.set_tracking_uri(f'{dagshub_url}/{repo_owner}/{repo_name}.mlflow')
 
 # logging configuration
 logger = logging.getLogger('model_registration')
@@ -12,47 +25,61 @@ logger.setLevel('DEBUG')
 
 console_handler = logging.StreamHandler()
 console_handler.setLevel('DEBUG')
+
+file_handler = logging.FileHandler('model_registration_errors.log')
+file_handler.setLevel('ERROR')
+
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 console_handler.setFormatter(formatter)
+file_handler.setFormatter(formatter)
+
 logger.addHandler(console_handler)
+logger.addHandler(file_handler)
+
+def load_model_info(file_path: str) -> dict:
+    """Load the model info from a JSON file."""
+    try:
+        with open(file_path, 'r') as file:
+            model_info = json.load(file)
+        logger.debug('Model info loaded from %s', file_path)
+        return model_info
+    except FileNotFoundError:
+        logger.error('File not found: %s', file_path)
+        raise
+    except Exception as e:
+        logger.error('Unexpected error occurred while loading the model info: %s', e)
+        raise
+
+def register_model(model_name: str, model_info: dict):
+    """Register the model to the MLflow Model Registry."""
+    try:
+        model_uri = f"runs:/{model_info['run_id']}/{model_info['model_path']}"
+        logger.info(f"Targeting model URI: {model_uri}")
+        
+        # Register the model version on DagsHub
+        model_version = mlflow.register_model(model_uri, model_name)
+        
+        # Transition the model to "Staging" stage using the setup client
+        client = mlflow.tracking.MlflowClient()
+        client.transition_model_version_stage(
+            name=model_name,
+            version=str(model_version.version),
+            stage="Staging"
+        )
+        
+        logger.info(f'Model {model_name} version {model_version.version} registered and transitioned to Staging successfully!')
+    except Exception as e:
+        logger.error('Error during model registration: %s', e)
+        raise
 
 def main():
     try:
-        # 1. Load the performance metrics to verify what we are registering
-        metrics_path = os.path.join('reports', 'metrics.json')
-        logger.debug("Reading evaluation metrics from %s...", metrics_path)
-        with open(metrics_path, 'r') as f:
-            metrics = json.load(f)
+        model_info_path = 'reports/experiment_info.json'
+        model_info = load_model_info(model_info_path)
         
-        logger.info("Registering model with Accuracy: %.4f, F1-Score: %.4f", 
-                    metrics.get('accuracy', 0.0), metrics.get('f1_score', 0.0))
-
-        # 2. Point to the MLflow experiment
-        mlflow.set_experiment("Tweet_Emotion_Classification")
-        
-        # Start a run to log and register the model artifact
-        with mlflow.start_run() as run:
-            # Log metrics into this registration run context as well
-            mlflow.log_metrics({
-                "reg_accuracy": metrics.get('accuracy', 0.0),
-                "reg_f1": metrics.get('f1_score', 0.0)
-            })
-            
-            # Load the local model object to log it into MLflow
-            model_path = os.path.join('models', 'model.pkl')
-            with open(model_path, 'rb') as f:
-                model = pickle.load(f)
-            
-            # Log the model artifact to MLflow runs
-            logger.debug("Logging model artifact directly to MLflow...")
-            mlflow.sklearn.log_model(
-                sk_model=model,
-                artifact_path="model",
-                registered_model_name="Tweet_Emotion_Classifier_Model"
-            )
-            
-        logger.info("Model registered successfully in the MLflow Model Registry!")
-
+        # You can name this your custom Tweet classification model name
+        model_name = "Tweet_Emotion_Classifier"
+        register_model(model_name, model_info)
     except Exception as e:
         logger.error('Failed to complete the model registration process: %s', e)
         print(f"Error: {e}")

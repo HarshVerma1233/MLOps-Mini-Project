@@ -1,89 +1,117 @@
 # src/model/model_evaluation.py
-import numpy as np
-import pandas as pd
 import os
-import yaml
-import logging
-import pickle
 import json
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+import pickle
+import logging
+import pandas as pd
 import mlflow
-import dagshub
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
-mlflow.set_tracking_uri('https://dagshub.com/HarshVerma1233/MLOps-Mini-Project.mlflow')
-dagshub.init(repo_owner='HarshVerma1233', repo_name='MLOps-Mini-Project', mlflow=True)
-
-# logging configuration
+# Logging configuration
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('model_evaluation')
-logger.setLevel('DEBUG')
 
-console_handler = logging.StreamHandler()
-console_handler.setLevel('DEBUG')
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-console_handler.setFormatter(formatter)
-logger.addHandler(console_handler)
+# Set up DagsHub credentials for MLflow tracking remote communication
+dagshub_token = os.getenv("DAGSHUB_PAT")
+if not dagshub_token:
+    logger.warning("DAGSHUB_PAT environment variable is not set. Fetching remote MLflow runs may fail.")
+else:
+    os.environ["MLFLOW_TRACKING_USERNAME"] = dagshub_token
+    os.environ["MLFLOW_TRACKING_PASSWORD"] = dagshub_token
+
+dagshub_url = "https://dagshub.com"
+repo_owner = "HarshVerma1233"
+repo_name = "MLOps-Mini-Project"
+
+# Point tracking URI directly to your DagsHub repository
+mlflow.set_tracking_uri(f'{dagshub_url}/{repo_owner}/{repo_name}.mlflow')
 
 def main():
     try:
-        # 1. Load the processed evaluation test data
-        logger.debug("Loading processed test features...")
-        test_df = pd.read_csv(os.path.join('data/processed', 'test_features.csv'))
+        logger.info("Loading processed test features...")
+        test_data = pd.read_csv('data/processed/test_features.csv')
         
-        # Split features and labels
-        X_test = test_df.drop(columns=['label']).values
-        y_test = test_df['label'].values
-
-        # 2. Load the trained model artifact built in the previous stage
-        model_path = os.path.join('models', 'model.pkl')
-        logger.debug("Loading trained model from %s...", model_path)
-        with open(model_path, 'rb') as f:
+        # Adjust target column name to match your dataset labels
+        X_test = test_data.drop(columns=['label'])
+        y_test = test_data['label']
+        
+        logger.info("Loading trained model from models/model.pkl...")
+        with open('models/model.pkl', 'rb') as f:
             model = pickle.load(f)
-
-        # 3. Generate Predictions and Compute Performance Metrics
-        logger.debug("Running predictions on test set...")
-        y_pred = model.predict(X_test)
+            
+        logger.info("Running predictions on test set...")
+        predictions = model.predict(X_test)
         
-        accuracy = accuracy_score(y_test, y_pred)
-        precision, recall, f1, _ = precision_recall_fscore_support(y_test, y_pred, average='binary')
+        # Calculate metrics
+        accuracy = accuracy_score(y_test, predictions)
+        precision = precision_score(y_test, predictions, average='weighted', zero_division=0)
+        recall = recall_score(y_test, predictions, average='weighted', zero_division=0)
+        f1 = f1_score(y_test, predictions, average='weighted', zero_division=0)
         
-        logger.debug("Metrics calculated - Accuracy: %.4f, F1-Score: %.4f", accuracy, f1)
-
-        # 4. Log the Metrics to MLflow (attaches to the ongoing experiment)
-        mlflow.set_experiment("Tweet_Emotion_Classification")
+        logger.info(f"Metrics calculated - Accuracy: {accuracy:.4f}, F1-Score: {f1:.4f}")
         
-        # If running inside a DVC pipeline, we let it log standalone or append metrics
-        with mlflow.start_run(nested=True):
-            mlflow.log_metric("eval_accuracy", accuracy)
-            mlflow.log_metric("eval_precision", precision)
-            mlflow.log_metric("eval_recall", recall)
-            mlflow.log_metric("eval_f1", f1)
-            logger.debug("Logged metrics successfully to MLflow.")
-
-        # 5. Build and save the json reports exactly where dvc.yaml expects them
+        # Ensure report directory exists
         os.makedirs('reports', exist_ok=True)
         
+        # 1. Save local metrics report for DVC tracking
         metrics_dict = {
             "accuracy": float(accuracy),
             "precision": float(precision),
             "recall": float(recall),
             "f1_score": float(f1)
         }
-        
-        # Write to metrics.json
-        metrics_path = os.path.join('reports', 'metrics.json') 
-        with open(metrics_path, 'w') as f:
+        with open('reports/metrics.json', 'w') as f:
             json.dump(metrics_dict, f, indent=4)
             
-        # Write to experiment_info.json
-        info_path = os.path.join('reports', 'experiment_info.json') 
-        with open(info_path, 'w') as f:
-            json.dump(metrics_dict, f, indent=4)
-            
-        logger.debug("Evaluation summaries saved successfully to reports/metrics.json and reports/experiment_info.json")
+        # 2. Extract active or last historical MLflow run metadata
+        run_id = "local_fallback_run"
+        try:
+            active_run = mlflow.active_run()
+            if active_run:
+                run_id = active_run.info.run_id
+                logger.info(f"Using current active run ID: {run_id}")
+            else:
+                logger.info("No active run found contextually. Querying remote tracking server for the latest run...")
+                client = mlflow.tracking.MlflowClient()
+                
+                # Match the exact experiment name declared in model_building.py
+                try:
+                    exp = client.get_experiment_by_name("Tweet_Emotion_Classification")
+                    exp_id = exp.experiment_id if exp else "0"
+                    logger.info(f"Connected to experiment: Tweet_Emotion_Classification (ID: {exp_id})")
+                except Exception:
+                    exp_id = "0"
 
+                # Pull latest run generated during model building
+                runs = client.search_runs(
+                    experiment_ids=[exp_id], 
+                    order_by=["attributes.start_time DESC"], 
+                    max_results=1
+                )
+                if runs:
+                    run_id = runs[0].info.run_id
+                    logger.info(f"Successfully retrieved recent run ID: {run_id}")
+                else:
+                    logger.warning("No runs found in history on tracking server under Tweet_Emotion_Classification.")
+        except Exception as mlflow_err:
+            logger.error(f"Failed to query backend MLflow server for run details: {mlflow_err}")
+        
+        # Save exact metadata mapping configuration for model registration stage
+        info_dict = {
+            "run_id": run_id,
+            "model_path": "model"
+        }
+        with open('reports/experiment_info.json', 'w') as f:
+            json.dump(info_dict, f, indent=4)
+            
+        logger.info("Evaluation summaries saved successfully to reports/metrics.json and reports/experiment_info.json")
+        
+    except FileNotFoundError as e:
+        logger.error(f"File tracking error: {e}")
+        raise e
     except Exception as e:
-        logger.error('Failed to complete the model evaluation process: %s', e)
-        print(f"Error: {e}")
+        logger.error(f"An unexpected error occurred during evaluation: {e}")
+        raise e
 
 if __name__ == '__main__':
     main()
