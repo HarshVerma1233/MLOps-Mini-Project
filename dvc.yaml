@@ -32,6 +32,7 @@ stages:
   model_building:
     cmd: python src/model/model_building.py
     deps:
+    - data/interim
     - data/processed
     - src/model/model_building.py
     outs:

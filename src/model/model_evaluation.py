@@ -1,117 +1,113 @@
-# src/model/model_evaluation.py
+import numpy as np
+import pandas as pd
 import os
 import json
 import pickle
 import logging
-import pandas as pd
 import mlflow
+import mlflow.sklearn
+from mlflow.tracking import MlflowClient
+import dagshub
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
-# Logging configuration
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger('model_evaluation')
-
-# Set up DagsHub credentials for MLflow tracking remote communication
+# --- SET UP DAGSHUB CREDENTIALS ---
 dagshub_token = os.getenv("DAGSHUB_PAT")
+
 if not dagshub_token:
-    logger.warning("DAGSHUB_PAT environment variable is not set. Fetching remote MLflow runs may fail.")
+    logging.warning("DAGSHUB_PAT environment variable is not set!")
 else:
-    os.environ["MLFLOW_TRACKING_USERNAME"] = dagshub_token
+    os.environ["MLFLOW_TRACKING_USERNAME"] = "HarshVerma1233"
     os.environ["MLFLOW_TRACKING_PASSWORD"] = dagshub_token
 
-dagshub_url = "https://dagshub.com"
-repo_owner = "HarshVerma1233"
-repo_name = "MLOps-Mini-Project"
+dagshub.init(repo_owner='HarshVerma1233', repo_name='MLOps-Mini-Project', mlflow=True)
 
-# Point tracking URI directly to your DagsHub repository
-mlflow.set_tracking_uri(f'{dagshub_url}/{repo_owner}/{repo_name}.mlflow')
+# Logging configuration
+logger = logging.getLogger('model_evaluation')
+logger.setLevel('DEBUG')
+
+console_handler = logging.StreamHandler()
+console_handler.setLevel('DEBUG')
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
+
 
 def main():
     try:
-        logger.info("Loading processed test features...")
-        test_data = pd.read_csv('data/processed/test_features.csv')
-        
-        # Adjust target column name to match your dataset labels
-        X_test = test_data.drop(columns=['label'])
-        y_test = test_data['label']
-        
-        logger.info("Loading trained model from models/model.pkl...")
-        with open('models/model.pkl', 'rb') as f:
+        # Load local model
+        model_path = os.path.join('models', 'model.pkl')
+        with open(model_path, 'rb') as f:
             model = pickle.load(f)
-            
-        logger.info("Running predictions on test set...")
-        predictions = model.predict(X_test)
-        
-        # Calculate metrics
-        accuracy = accuracy_score(y_test, predictions)
-        precision = precision_score(y_test, predictions, average='weighted', zero_division=0)
-        recall = recall_score(y_test, predictions, average='weighted', zero_division=0)
-        f1 = f1_score(y_test, predictions, average='weighted', zero_division=0)
-        
-        logger.info(f"Metrics calculated - Accuracy: {accuracy:.4f}, F1-Score: {f1:.4f}")
-        
-        # Ensure report directory exists
-        os.makedirs('reports', exist_ok=True)
-        
-        # 1. Save local metrics report for DVC tracking
-        metrics_dict = {
-            "accuracy": float(accuracy),
-            "precision": float(precision),
-            "recall": float(recall),
-            "f1_score": float(f1)
-        }
-        with open('reports/metrics.json', 'w') as f:
-            json.dump(metrics_dict, f, indent=4)
-            
-        # 2. Extract active or last historical MLflow run metadata
-        run_id = "local_fallback_run"
-        try:
-            active_run = mlflow.active_run()
-            if active_run:
-                run_id = active_run.info.run_id
-                logger.info(f"Using current active run ID: {run_id}")
-            else:
-                logger.info("No active run found contextually. Querying remote tracking server for the latest run...")
-                client = mlflow.tracking.MlflowClient()
-                
-                # Match the exact experiment name declared in model_building.py
-                try:
-                    exp = client.get_experiment_by_name("Tweet_Emotion_Classification")
-                    exp_id = exp.experiment_id if exp else "0"
-                    logger.info(f"Connected to experiment: Tweet_Emotion_Classification (ID: {exp_id})")
-                except Exception:
-                    exp_id = "0"
 
-                # Pull latest run generated during model building
-                runs = client.search_runs(
-                    experiment_ids=[exp_id], 
-                    order_by=["attributes.start_time DESC"], 
-                    max_results=1
-                )
-                if runs:
-                    run_id = runs[0].info.run_id
-                    logger.info(f"Successfully retrieved recent run ID: {run_id}")
-                else:
-                    logger.warning("No runs found in history on tracking server under Tweet_Emotion_Classification.")
-        except Exception as mlflow_err:
-            logger.error(f"Failed to query backend MLflow server for run details: {mlflow_err}")
+        # Load test dataset
+        test_df = pd.read_csv(os.path.join('data/processed', 'test_features.csv'))
+        X_test = test_df.drop(columns=['label']).values
+        y_test = test_df['label'].values
+
+        # Make predictions
+        y_pred = model.predict(X_test)
+
+        # Calculate metrics
+        acc = accuracy_score(y_test, y_pred)
+        prec = precision_score(y_test, y_pred, average='weighted')
+        rec = recall_score(y_test, y_pred, average='weighted')
+        f1 = f1_score(y_test, y_pred, average='weighted')
+
+        logger.info("Evaluation Metrics - Accuracy: %.4f, Precision: %.4f, Recall: %.4f, F1: %.4f", acc, prec, rec, f1)
+
+        # Retrieve the latest active run ID directly from DagsHub MLflow remote
+        client = MlflowClient()
+        experiment = client.get_experiment_by_name("Tweet_Emotion_Classification")
         
-        # Save exact metadata mapping configuration for model registration stage
-        info_dict = {
-            "run_id": run_id,
-            "model_path": "model"
+        if experiment is None:
+            raise ValueError("Experiment 'Tweet_Emotion_Classification' not found on MLflow remote.")
+
+        runs = client.search_runs(
+            experiment_ids=[experiment.experiment_id],
+            order_by=["attribute.start_time DESC"],
+            max_results=1
+        )
+
+        if not runs:
+            raise ValueError("No existing runs found in experiment 'Tweet_Emotion_Classification'.")
+
+        latest_run_id = runs[0].info.run_id
+        logger.info(f"Targeting active remote run ID for evaluation metrics: {latest_run_id}")
+
+        # Log evaluation metrics to the retrieved remote run
+        with mlflow.start_run(run_id=latest_run_id):
+            mlflow.log_metric("eval_accuracy", acc)
+            mlflow.log_metric("eval_precision", prec)
+            mlflow.log_metric("eval_recall", rec)
+            mlflow.log_metric("eval_f1_score", f1)
+
+        # Save metrics locally
+        os.makedirs('reports', exist_ok=True)
+        metrics_path = os.path.join('reports', 'metrics.json')
+        metrics = {
+            'accuracy': acc,
+            'precision': prec,
+            'recall': rec,
+            'f1_score': f1
         }
-        with open('reports/experiment_info.json', 'w') as f:
-            json.dump(info_dict, f, indent=4)
-            
-        logger.info("Evaluation summaries saved successfully to reports/metrics.json and reports/experiment_info.json")
-        
-    except FileNotFoundError as e:
-        logger.error(f"File tracking error: {e}")
-        raise e
+        with open(metrics_path, 'w') as f:
+            json.dump(metrics, f, indent=4)
+
+        # Write experiment info containing the verified run ID for model_registration stage
+        exp_info_path = os.path.join('reports', 'experiment_info.json')
+        exp_info = {
+            'run_id': latest_run_id,
+            'experiment_name': "Tweet_Emotion_Classification"
+        }
+        with open(exp_info_path, 'w') as f:
+            json.dump(exp_info, f, indent=4)
+
+        logger.debug("Evaluation metrics and experiment info saved to reports/")
+
     except Exception as e:
-        logger.error(f"An unexpected error occurred during evaluation: {e}")
-        raise e
+        logger.error("Failed during model evaluation: %s", e)
+        print(f"Error: {e}")
+        raise
 
 if __name__ == '__main__':
     main()

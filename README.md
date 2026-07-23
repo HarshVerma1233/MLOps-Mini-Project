@@ -6,6 +6,27 @@
 
 A mini project using MLOps
 
+## Flask model serving
+
+The Flask API loads the registered MLflow model from DagsHub and classifies text as
+`happy` or `sad`. Set `DAGSHUB_PAT` in `.env`, then run:
+
+```bash
+python flask-app/app.py
+```
+
+Send text to the prediction endpoint:
+
+```bash
+curl -X POST http://localhost:5000/predict \
+  -H "Content-Type: application/json" \
+  -d '{"text":"I am having a wonderful day"}'
+```
+
+The response contains `prediction` (`1` for happy and `0` for sad) and the
+corresponding `emotion`. Set `MLFLOW_MODEL_URI` to override the default
+`models:/Tweet_Emotion_Classifier/Staging` URI.
+
 ## Project Organization
 
 ```
@@ -58,4 +79,3 @@ A mini project using MLOps
 ```
 
 --------
-
